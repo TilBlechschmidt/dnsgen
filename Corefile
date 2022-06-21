@@ -1,0 +1,6 @@
+. {
+    auto {
+        directory ./zones
+        reload 5s
+    }
+}
