@@ -4,7 +4,6 @@ use std::{net::Ipv4Addr, num::ParseIntError, time::Duration};
 mod store;
 pub use store::AnnouncementStore;
 
-// TODO Use a type that disallows invalid DNS names
 pub type FQDN = String;
 
 #[derive(Serialize, Deserialize, Debug)]

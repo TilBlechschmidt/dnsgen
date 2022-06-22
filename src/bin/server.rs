@@ -33,6 +33,10 @@ struct ServerOptions {
 
     /// Location to store the zone file at
     zone_file: PathBuf,
+
+    /// Where the authoritive nameserver for the given domain can be found
+    #[structopt(short, long)]
+    authoritive_nameserver: String,
 }
 
 /// Waits for changes on the given notifier and generates a new config every time it gets notified
@@ -40,9 +44,10 @@ async fn config_update_loop(
     store: Arc<Mutex<AnnouncementStore>>,
     notifier: Arc<Notify>,
     domain: String,
+    authoritive_nameserver: String,
     path: PathBuf,
 ) {
-    let root_domain_len = domain.len() + 1;
+    let root_domain_len = domain.len() + 1; // +1 to include the `.` in front of the domain name
     let mut zone_serial = 0;
 
     loop {
@@ -54,7 +59,7 @@ async fn config_update_loop(
             // https://help.dyn.com/how-to-format-a-zone-file/
 
             let mut zone_file: String = format!(
-                "@               3600 SOA {domain: >16}. zone-admin.{domain}. {zone_serial} 3600 600 604800 1800\n"
+                "@               3600 SOA {authoritive_nameserver: >16}. zone-admin.{domain}. {zone_serial} 3600 600 604800 1800\n"
             );
 
             for (host, ips) in entries {
@@ -150,6 +155,7 @@ async fn main() {
         store.clone(),
         notifier.clone(),
         options.domain.clone(),
+        options.authoritive_nameserver,
         options.zone_file,
     ));
 
