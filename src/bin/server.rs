@@ -1,14 +1,21 @@
 use dnsgen::{parse_seconds, Announcement, AnnouncementStore};
-use reqwest::StatusCode;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use reqwest::{Client, StatusCode, Url};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use structopt::StructOpt;
 use tokio::{
     fs,
-    sync::{Mutex, Notify},
+    sync::{
+        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        Mutex, Notify,
+    },
     task,
     time::sleep,
 };
 use warp::{reply, Filter};
+
+/// Header which prevents further mirroring of requests when set to "true"
+/// (stops infinite forwarding loops)
+const HEADER_DNSGEN_MIRROR: &str = "X-DNSGEN-MIRRORED";
 
 #[derive(StructOpt, Debug)]
 struct ServerOptions {
@@ -37,6 +44,9 @@ struct ServerOptions {
     /// Where the authoritive nameserver for the given domain can be found
     #[structopt(short, long)]
     authoritive_nameserver: String,
+
+    /// Path to a file containing a whitespace separated list of IPs to where incoming request shall be mirrored
+    mirror: Option<PathBuf>,
 }
 
 /// Waits for changes on the given notifier and generates a new config every time it gets notified
@@ -96,22 +106,61 @@ async fn cleanup_loop(
     }
 }
 
+/// Retrieves a list of URLs from a file on disk
+async fn fetch_mirroring_endpoints(path: &PathBuf) -> Result<Vec<Url>, io::Error> {
+    Ok(fs::read_to_string(path)
+        .await?
+        .split_whitespace()
+        .filter_map(|s| match Url::parse(&format!("http://{}", s)) {
+            Ok(url) => Some(url),
+            Err(error) => {
+                eprintln!("Failed to parse URL from mirroring file: {error}");
+                None
+            }
+        })
+        .collect())
+}
+
+/// Mirrors requests to other instances of dnsgen
+async fn mirroring_loop(mut rx: UnboundedReceiver<Announcement>, path: PathBuf) {
+    let client = Client::new();
+
+    while let Some(announcement) = rx.recv().await {
+        let endpoints = fetch_mirroring_endpoints(&path).await.unwrap();
+
+        for endpoint in endpoints {
+            let response = client
+                .post(endpoint.clone())
+                .json(&announcement)
+                .header(HEADER_DNSGEN_MIRROR, "true")
+                .send();
+
+            if let Err(err) = response.await {
+                eprintln!("Failed to mirror to {endpoint}: {err}");
+            }
+        }
+    }
+}
+
 /// Stores announcements received via HTTP POST in the given store and sends notifications each time it does so
 async fn http_server(
     store: Arc<Mutex<AnnouncementStore>>,
     notifier: Arc<Notify>,
     port: u16,
     domain: String,
+    mirror_tx: Option<UnboundedSender<Announcement>>,
 ) {
     let store_ref = store.clone();
 
     let receiver = warp::post()
         .and(warp::body::content_length_limit(1024))
         .and(warp::body::json())
-        .then(move |announcement: Announcement| {
+        .and(warp::header(HEADER_DNSGEN_MIRROR))
+        .then(move |announcement: Announcement, mirrored: bool| {
             let store = store_ref.clone();
             let notifier = notifier.clone();
             let domain = domain.clone();
+            let mirror_tx = mirror_tx.clone();
 
             async move {
                 if !announcement.fqdn.ends_with(&domain) {
@@ -121,6 +170,15 @@ async fn http_server(
                     )
                 } else {
                     let mut store = store.lock().await;
+
+                    if !mirrored {
+                        if let Some(tx) = mirror_tx {
+                            println!("mirroring request");
+                            if tx.send(announcement.clone()).is_err() {
+                                eprintln!("Mirroring TX has been closed!");
+                            }
+                        }
+                    }
 
                     if store.add(announcement) {
                         notifier.notify_waiters();
@@ -151,6 +209,14 @@ async fn main() {
         options.verbose,
     )));
 
+    let mirror_tx = if let Some(path) = options.mirror {
+        let (tx, rx) = unbounded_channel();
+        task::spawn(mirroring_loop(rx, path));
+        Some(tx)
+    } else {
+        None
+    };
+
     task::spawn(config_update_loop(
         store.clone(),
         notifier.clone(),
@@ -165,5 +231,5 @@ async fn main() {
         options.purge_interval,
     ));
 
-    http_server(store, notifier, options.port, options.domain).await;
+    http_server(store, notifier, options.port, options.domain, mirror_tx).await;
 }

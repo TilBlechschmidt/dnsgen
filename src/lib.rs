@@ -6,7 +6,7 @@ pub use store::AnnouncementStore;
 
 pub type FQDN = String;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Announcement {
     pub fqdn: FQDN,
     pub ip: Ipv4Addr,
