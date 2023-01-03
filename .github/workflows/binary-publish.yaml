@@ -2,20 +2,50 @@ on:
   release:
     types: [created]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  release:
-    name: release ${{ matrix.target }}
+  github-release:
+    if: github.event_name == 'release'
+    name: 🐙 Attach binary to GitHub Release
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-unknown-linux-musl]
     steps:
-      - uses: actions/checkout@master
-      - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.0
+      - uses: actions/checkout@v3
+
+      - name: Build
+        run: cargo build --verbose --release
+
+      # - name: Run tests
+      #   run: cargo test --verbose
+
+      - name: Build release asset upload url
+        run: |
+          RELEASE_ID=$(jq --raw-output '.release.id' $GITHUB_EVENT_PATH)
+          if [[ -z "${RELEASE_ID}" ]]; then
+            echo "There was no release ID in the GitHub event."
+            exit 1
+          fi
+          RELEASE_ASSET_UPLOAD_URL="https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets"
+          echo "$RELEASE_ASSET_UPLOAD_URL"
+          echo "RELEASE_ASSET_UPLOAD_URL=$RELEASE_ASSET_UPLOAD_URL" >> $GITHUB_ENV
+
+      - name: Attach server executable
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          RUSTTARGET: ${{ matrix.target }}
-          # EXTRA_FILES: "README.md LICENSE"
+          upload_url: ${{ env.RELEASE_ASSET_UPLOAD_URL }}?name=dnsgen-server
+          asset_path: target/release/server
+          asset_name: dnsgen-server
+          asset_content_type: application/octet-stream
+
+      - name: Attach client executable
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ env.RELEASE_ASSET_UPLOAD_URL }}?name=dnsgen-client
+          asset_path: target/release/client
+          asset_name: dnsgen-client
+          asset_content_type: application/octet-stream

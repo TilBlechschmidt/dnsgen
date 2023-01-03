@@ -155,8 +155,8 @@ async fn http_server(
     let receiver = warp::post()
         .and(warp::body::content_length_limit(1024))
         .and(warp::body::json())
-        .and(warp::header(HEADER_DNSGEN_MIRROR))
-        .then(move |announcement: Announcement, mirrored: bool| {
+        .and(warp::header::optional(HEADER_DNSGEN_MIRROR))
+        .then(move |announcement: Announcement, mirrored: Option<bool>| {
             let store = store_ref.clone();
             let notifier = notifier.clone();
             let domain = domain.clone();
@@ -171,7 +171,7 @@ async fn http_server(
                 } else {
                     let mut store = store.lock().await;
 
-                    if !mirrored {
+                    if !mirrored.unwrap_or_default() {
                         if let Some(tx) = mirror_tx {
                             println!("mirroring request");
                             if tx.send(announcement.clone()).is_err() {
@@ -230,6 +230,11 @@ async fn main() {
         notifier.clone(),
         options.purge_interval,
     ));
+
+    println!(
+        "listening on 0.0.0.0:{} (domain=*.{})",
+        options.port, options.domain
+    );
 
     http_server(store, notifier, options.port, options.domain, mirror_tx).await;
 }

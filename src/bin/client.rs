@@ -35,7 +35,7 @@ fn find_ips(subnet: Ipv4Network) -> impl Iterator<Item = Ipv4Addr> {
         .filter(move |ip| subnet.contains(*ip))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     let options = ClientOptions::from_args();
 
     println!(
