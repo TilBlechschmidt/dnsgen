@@ -5,7 +5,6 @@ FROM ekidd/rust-musl-builder AS builder
 ADD --chown=rust:rust . ./
 
 RUN cargo build --release --bin server --bin client
-RUN pwd && ls target
 
 FROM alpine
 
