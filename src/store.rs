@@ -47,8 +47,7 @@ impl AnnouncementStore {
 
             // Remove all IP entries that are too old
             entries.retain(|ip, timestamp| {
-                let age = Instant::now() - *timestamp;
-                let fresh = age < self.threshold;
+                let fresh = timestamp.elapsed() < self.threshold;
 
                 if self.verbose && !fresh {
                     println!("- {} {}", hostname, ip);

@@ -33,6 +33,7 @@ pub struct SubnetScanner {
     task: JoinHandle<()>,
 
     notifier: Arc<Notify>,
+    verbose: bool,
 }
 
 impl SubnetScanner {
@@ -40,6 +41,7 @@ impl SubnetScanner {
         subnet: Ipv4Net,
         iface_name: Option<String>,
         notifier: Arc<Notify>,
+        verbose: bool,
     ) -> io::Result<Self> {
         let iface_name = iface_name.unwrap_or(interfaces()
             .into_iter()
@@ -75,18 +77,16 @@ impl SubnetScanner {
             task,
 
             notifier,
+            verbose,
         })
     }
 
     pub async fn sweep(&self) -> io::Result<()> {
-        println!("Scanning {} hosts", self.subnet.hosts().count());
         for ip in self.subnet.hosts() {
             let message = ArpMessage::new_arp_request(self.mac, self.ip, ip);
             message.send(&self.interface)?;
             sleep(STAGGER).await;
         }
-
-        println!("Done scanning");
 
         Ok(())
     }
@@ -103,7 +103,15 @@ impl SubnetScanner {
     pub fn remove_old(&self, max_age: Duration) {
         let mut entries = self.entries.lock().expect("failed to lock ARP mutex");
         let original_len = entries.len();
-        entries.retain(|_, (_, i)| i.elapsed() < max_age);
+        entries.retain(|mac, (ip, i)| {
+            let fresh = i.elapsed() < max_age;
+
+            if self.verbose && !fresh {
+                println!("- {}.k8s.ppidev.net {ip}", MacAddr::from(*mac));
+            }
+
+            fresh
+        });
 
         if entries.len() != original_len {
             self.notifier.notify_waiters();
@@ -125,14 +133,21 @@ impl SubnetScanner {
                         let mac = message.source_hardware_address;
                         let ip = message.source_protocol_address;
 
-                        let added = entries
+                        let old_entry = entries
                             .lock()
                             .expect("failed to lock ARP mutex")
-                            .insert(mac.into(), (ip, Instant::now()))
-                            .is_none();
+                            .insert(mac.into(), (ip, Instant::now()));
 
-                        if added {
-                            notifier.notify_one();
+                        match old_entry {
+                            None => {
+                                println!("+ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
+                                notifier.notify_one();
+                            }
+                            Some((old_ip, _)) if old_ip != ip => {
+                                println!("~ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
+                                notifier.notify_one();
+                            }
+                            _ => {}
                         }
                     }
                 } else {

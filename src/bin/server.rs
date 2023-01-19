@@ -175,7 +175,7 @@ async fn arp_scan_loop(scanner: Arc<SubnetScanner>, interval: Duration) {
             eprintln!("Failed to do ARP scan {err:?}");
         }
 
-        scanner.remove_old(interval);
+        scanner.remove_old(interval * 2);
         sleep(interval).await;
     }
 }
@@ -257,8 +257,13 @@ async fn main() {
 
     let scanner = if let Some(subnet) = options.arp_net {
         let scanner = Arc::new(
-            SubnetScanner::new(subnet, options.arp_interface_name, notifier.clone())
-                .expect("failed to initialize ARP scanner"),
+            SubnetScanner::new(
+                subnet,
+                options.arp_interface_name,
+                notifier.clone(),
+                options.verbose,
+            )
+            .expect("failed to initialize ARP scanner"),
         );
 
         task::spawn(arp_scan_loop(scanner.clone(), options.arp_interval));
