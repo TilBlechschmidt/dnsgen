@@ -1,4 +1,5 @@
-use dnsgen::{parse_seconds, Announcement, AnnouncementStore};
+use dnsgen::{parse_seconds, Announcement, AnnouncementStore, SubnetScanner};
+use ipnet::Ipv4Net;
 use reqwest::{Client, StatusCode, Url};
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use structopt::StructOpt;
@@ -47,12 +48,31 @@ struct ServerOptions {
 
     /// Path to a file containing a whitespace separated list of IPs to where incoming request shall be mirrored
     mirror: Option<PathBuf>,
+
+    /// Subnet to scan for devices
+    ///
+    /// If set, dnsgen will occasionally sweep the subnet with ARP messages to find any MAC->IP associations
+    /// for which A-records will be created.
+    ///
+    /// NOTE: This requires actively listening in to all Ethernet traffic which uses a good amount of CPU!
+    #[structopt(long)]
+    arp_net: Option<Ipv4Net>,
+
+    /// Interval of subnet scans, see arp_net for more details
+    #[structopt(long, default_value = "30", parse(try_from_str = parse_seconds))]
+    arp_interval: Duration,
+
+    /// Optionally specify the interface on which scans should be performed
+    ///
+    /// If not set, the interface will be inferred based on the subnet.
+    arp_interface_name: Option<String>,
 }
 
 /// Waits for changes on the given notifier and generates a new config every time it gets notified
 async fn config_update_loop(
     store: Arc<Mutex<AnnouncementStore>>,
     notifier: Arc<Notify>,
+    scanner: Option<Arc<SubnetScanner>>,
     domain: String,
     authoritive_nameserver: String,
     path: PathBuf,
@@ -76,6 +96,12 @@ async fn config_update_loop(
                 let subdomain = &host[..host.len() - root_domain_len];
                 for ip in ips {
                     zone_file += &format!("{subdomain: <16} 60 A {ip: >16}\n");
+                }
+            }
+
+            if let Some(scanner) = scanner.as_ref() {
+                for (mac, ip) in scanner.hosts() {
+                    zone_file += &format!("{mac: <16} 60 A {ip: >16}\n")
                 }
             }
 
@@ -139,6 +165,18 @@ async fn mirroring_loop(mut rx: UnboundedReceiver<Announcement>, path: PathBuf) 
                 eprintln!("Failed to mirror to {endpoint}: {err}");
             }
         }
+    }
+}
+
+/// Scans the local subnet every now and then
+async fn arp_scan_loop(scanner: Arc<SubnetScanner>, interval: Duration) {
+    loop {
+        if let Err(err) = scanner.sweep().await {
+            eprintln!("Failed to do ARP scan {err:?}");
+        }
+
+        scanner.remove_old(interval);
+        sleep(interval).await;
     }
 }
 
@@ -217,9 +255,23 @@ async fn main() {
         None
     };
 
+    let scanner = if let Some(subnet) = options.arp_net {
+        let scanner = Arc::new(
+            SubnetScanner::new(subnet, options.arp_interface_name, notifier.clone())
+                .expect("failed to initialize ARP scanner"),
+        );
+
+        task::spawn(arp_scan_loop(scanner.clone(), options.arp_interval));
+
+        Some(scanner)
+    } else {
+        None
+    };
+
     task::spawn(config_update_loop(
         store.clone(),
         notifier.clone(),
+        scanner,
         options.domain.clone(),
         options.authoritive_nameserver,
         options.zone_file,

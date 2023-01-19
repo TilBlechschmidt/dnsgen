@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{net::Ipv4Addr, num::ParseIntError, time::Duration};
 
+mod arp;
 mod store;
+
+pub use arp::SubnetScanner;
 pub use store::AnnouncementStore;
 
 pub type FQDN = String;
