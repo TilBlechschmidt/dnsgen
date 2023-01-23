@@ -89,19 +89,19 @@ async fn config_update_loop(
             // https://help.dyn.com/how-to-format-a-zone-file/
 
             let mut zone_file: String = format!(
-                "@               3600 SOA {authoritive_nameserver: >16}. zone-admin.{domain}. {zone_serial} 3600 600 604800 1800\n"
+                "@               30 SOA {authoritive_nameserver: >16}. zone-admin.{domain}. {zone_serial} 30 25 604800 30\n"
             );
 
             for (host, ips) in entries {
                 let subdomain = &host[..host.len() - root_domain_len];
                 for ip in ips {
-                    zone_file += &format!("{subdomain: <16} 60 A {ip: >16}\n");
+                    zone_file += &format!("{subdomain: <16} 10 A {ip: >16}\n");
                 }
             }
 
             if let Some(scanner) = scanner.as_ref() {
                 for (mac, ip) in scanner.hosts() {
-                    zone_file += &format!("{mac: <16} 60 A {ip: >16}\n")
+                    zone_file += &format!("{mac: <16} 10 A {ip: >16}\n")
                 }
             }
 
