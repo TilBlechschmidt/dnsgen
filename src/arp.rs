@@ -13,11 +13,17 @@ use libarp::{
     interfaces::{Interface, MacAddr as ArpMacAddr},
 };
 use pnet_datalink::interfaces;
-use tokio::{sync::Notify, task::JoinHandle, time::sleep};
+use serde::Deserialize;
+use tokio::{
+    sync::Notify,
+    task::JoinHandle,
+    time::{sleep, timeout},
+};
 
 const STAGGER: Duration = Duration::from_millis(1);
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Deserialize)]
+#[serde(try_from = "String")]
 pub struct MacAddr(pub [u8; 6]);
 
 type Entries = Arc<Mutex<HashMap<MacAddr, (Ipv4Addr, Instant)>>>;
@@ -91,6 +97,32 @@ impl SubnetScanner {
         Ok(())
     }
 
+    pub async fn resolve(&self, mac: MacAddr, timeout: Duration) -> io::Result<Ipv4Addr> {
+        // In most cases, this does nothing as RARP is effectively dead
+        // However, we should still discover the host with the next sweep
+        let message = ArpMessage::new_rarp_request(self.mac, mac.into());
+        message.send(&self.interface)?;
+
+        Ok(self::timeout(timeout, self.wait_for_host(mac)).await?)
+    }
+
+    async fn wait_for_host(&self, mac: MacAddr) -> Ipv4Addr {
+        loop {
+            if let Some(ip) = self
+                .entries
+                .lock()
+                .expect("failed to lock ARP mutex")
+                .iter()
+                .find(|(m, _)| **m == mac)
+                .map(|(_, (ip, _))| ip)
+            {
+                return *ip;
+            }
+
+            self.notifier.notified().await;
+        }
+    }
+
     pub fn hosts(&self) -> Vec<(MacAddr, Ipv4Addr)> {
         self.entries
             .lock()
@@ -115,6 +147,7 @@ impl SubnetScanner {
 
         if entries.len() != original_len {
             self.notifier.notify_waiters();
+            self.notifier.notify_one();
         }
     }
 
@@ -129,26 +162,31 @@ impl SubnetScanner {
         tokio::spawn(async move {
             loop {
                 if let Some(message) = client.receive_next().await {
-                    if message.operation == Operation::ArpResponse {
-                        let mac = message.source_hardware_address;
-                        let ip = message.source_protocol_address;
+                    match message.operation {
+                        Operation::ArpResponse | Operation::RarpResponse => {
+                            let mac = message.source_hardware_address;
+                            let ip = message.source_protocol_address;
 
-                        let old_entry = entries
-                            .lock()
-                            .expect("failed to lock ARP mutex")
-                            .insert(mac.into(), (ip, Instant::now()));
+                            let old_entry = entries
+                                .lock()
+                                .expect("failed to lock ARP mutex")
+                                .insert(mac.into(), (ip, Instant::now()));
 
-                        match old_entry {
-                            None => {
-                                println!("+ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
-                                notifier.notify_one();
+                            match old_entry {
+                                None => {
+                                    println!("+ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
+                                    notifier.notify_waiters();
+                                    notifier.notify_one();
+                                }
+                                Some((old_ip, _)) if old_ip != ip => {
+                                    println!("~ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
+                                    notifier.notify_waiters();
+                                    notifier.notify_one();
+                                }
+                                _ => {}
                             }
-                            Some((old_ip, _)) if old_ip != ip => {
-                                println!("~ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
-                                notifier.notify_one();
-                            }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 } else {
                     sleep(STAGGER).await;
@@ -175,6 +213,27 @@ impl From<MacAddr> for ArpMacAddr {
         Self(
             value.0[0], value.0[1], value.0[2], value.0[3], value.0[4], value.0[5],
         )
+    }
+}
+
+impl TryFrom<String> for MacAddr {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let mut bytes = [0; 6];
+        let mut read = 0;
+
+        for (i, digit) in value.split(":").enumerate() {
+            if i < 6 {
+                bytes[i] = u8::from_str_radix(digit, 16).map_err(|e| e.to_string())?;
+            }
+            read += 1;
+        }
+
+        match read {
+            6 => Ok(Self(bytes)),
+            _ => Err("invalid number of hex digits".into()),
+        }
     }
 }
 

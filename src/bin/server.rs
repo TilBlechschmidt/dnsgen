@@ -1,4 +1,4 @@
-use dnsgen::{parse_seconds, Announcement, AnnouncementStore, SubnetScanner};
+use dnsgen::{parse_seconds, Announcement, AnnouncementStore, MacAddr, SubnetScanner};
 use ipnet::Ipv4Net;
 use reqwest::{Client, StatusCode, Url};
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
@@ -12,7 +12,7 @@ use tokio::{
     task,
     time::sleep,
 };
-use warp::{reply, Filter};
+use warp::{hyper::body::Bytes, reply, Filter};
 
 /// Header which prevents further mirroring of requests when set to "true"
 /// (stops infinite forwarding loops)
@@ -128,6 +128,7 @@ async fn cleanup_loop(
 
         if store.lock().await.purge_old() > 0 {
             notifier.notify_waiters();
+            notifier.notify_one();
         }
     }
 }
@@ -187,10 +188,12 @@ async fn http_server(
     port: u16,
     domain: String,
     mirror_tx: Option<UnboundedSender<Announcement>>,
+    scanner: Option<Arc<SubnetScanner>>,
 ) {
     let store_ref = store.clone();
 
     let receiver = warp::post()
+        .and(warp::path::end())
         .and(warp::body::content_length_limit(1024))
         .and(warp::body::json())
         .and(warp::header::optional(HEADER_DNSGEN_MIRROR))
@@ -220,9 +223,39 @@ async fn http_server(
 
                     if store.add(announcement) {
                         notifier.notify_waiters();
+                        notifier.notify_one();
                     }
 
                     warp::reply::with_status("OK", StatusCode::OK)
+                }
+            }
+        });
+
+    let resolve = warp::post()
+        .and(warp::path("resolve"))
+        .and(warp::path::end())
+        .and(warp::body::bytes())
+        .then(move |bytes: Bytes| {
+            let scanner = scanner.clone();
+
+            async move {
+                if let Some(scanner) = scanner {
+                    match String::from_utf8_lossy(&bytes).to_string().try_into() {
+                        Ok(mac) => match scanner.resolve(mac, Duration::from_secs(120)).await {
+                            Ok(ip) => warp::reply::with_status(ip.to_string(), StatusCode::OK),
+                            Err(error) => {
+                                warp::reply::with_status(error.to_string(), StatusCode::NOT_FOUND)
+                            }
+                        },
+                        Err(error) => {
+                            warp::reply::with_status(error.to_string(), StatusCode::BAD_REQUEST)
+                        }
+                    }
+                } else {
+                    warp::reply::with_status(
+                        "ARP scanning not enabled".into(),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
                 }
             }
         });
@@ -232,7 +265,7 @@ async fn http_server(
         async move { reply::json(&store.lock().await.entries()) }
     });
 
-    let routes = query.or(receiver);
+    let routes = resolve.or(query).or(receiver);
 
     warp::serve(routes).run(([0, 0, 0, 0], port)).await;
 }
@@ -276,7 +309,7 @@ async fn main() {
     task::spawn(config_update_loop(
         store.clone(),
         notifier.clone(),
-        scanner,
+        scanner.clone(),
         options.domain.clone(),
         options.authoritive_nameserver,
         options.zone_file,
@@ -293,5 +326,13 @@ async fn main() {
         options.port, options.domain
     );
 
-    http_server(store, notifier, options.port, options.domain, mirror_tx).await;
+    http_server(
+        store,
+        notifier,
+        options.port,
+        options.domain,
+        mirror_tx,
+        scanner,
+    )
+    .await;
 }
