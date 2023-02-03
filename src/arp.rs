@@ -167,6 +167,16 @@ impl SubnetScanner {
                             let mac = message.source_hardware_address;
                             let ip = message.source_protocol_address;
 
+                            // TODO Mirror requests to somewhere
+                            // if !mirrored.unwrap_or_default() {
+                            //     if let Some(tx) = mirror_tx {
+                            //         println!("mirroring request");
+                            //         if tx.send(announcement.clone()).is_err() {
+                            //             eprintln!("Mirroring TX has been closed!");
+                            //         }
+                            //     }
+                            // }
+
                             let old_entry = entries
                                 .lock()
                                 .expect("failed to lock ARP mutex")

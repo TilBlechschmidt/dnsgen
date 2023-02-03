@@ -20,7 +20,7 @@ struct ClientOptions {
     server: String,
 
     /// Domain to advertise (e.g. 'hello-world.example.com'). Note that the server has to allow this domain.
-    fqdn: String,
+    fqdn: Vec<String>,
 }
 
 fn find_ips(subnet: Ipv4Network) -> impl Iterator<Item = Ipv4Addr> {
@@ -39,7 +39,7 @@ fn main() {
     let options = ClientOptions::from_args();
 
     println!(
-        "Announcing local interface IPs in subnet {} as '{}' every {} secs to {}",
+        "Announcing local interface IPs in subnet {} as '{:?}' every {} secs to {}",
         options.subnet,
         options.fqdn,
         options.interval.as_secs(),
@@ -55,20 +55,24 @@ fn main() {
 
     loop {
         for ip in find_ips(options.subnet) {
-            let announcement = Announcement {
-                fqdn: options.fqdn.clone(),
-                ip,
-            };
+            for fqdn in &options.fqdn {
+                let announcement = Announcement {
+                    fqdn: fqdn.clone(),
+                    ip,
+                };
 
-            match client
-                .post(&options.server)
-                .json(&announcement)
-                .send()
-                .map(Response::error_for_status)
-            {
-                Ok(Err(err)) => eprintln!("failed announcing {ip}: announcement rejected: {err}"),
-                Err(err) => eprintln!("failed announcing {ip}: http request failed: {err}"),
-                _ => (),
+                match client
+                    .post(&options.server)
+                    .json(&announcement)
+                    .send()
+                    .map(Response::error_for_status)
+                {
+                    Ok(Err(err)) => {
+                        eprintln!("failed announcing {ip}: announcement rejected: {err}")
+                    }
+                    Err(err) => eprintln!("failed announcing {ip}: http request failed: {err}"),
+                    _ => (),
+                }
             }
         }
 
