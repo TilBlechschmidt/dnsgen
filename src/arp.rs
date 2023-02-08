@@ -167,15 +167,8 @@ impl SubnetScanner {
                             let mac = message.source_hardware_address;
                             let ip = message.source_protocol_address;
 
+                            // TODO Ignore or automatically add own MAC/IP
                             // TODO Mirror requests to somewhere
-                            // if !mirrored.unwrap_or_default() {
-                            //     if let Some(tx) = mirror_tx {
-                            //         println!("mirroring request");
-                            //         if tx.send(announcement.clone()).is_err() {
-                            //             eprintln!("Mirroring TX has been closed!");
-                            //         }
-                            //     }
-                            // }
 
                             let old_entry = entries
                                 .lock()
@@ -184,12 +177,12 @@ impl SubnetScanner {
 
                             match old_entry {
                                 None => {
-                                    println!("+ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
+                                    println!("+ {} {ip}", MacAddr::from(mac));
                                     notifier.notify_waiters();
                                     notifier.notify_one();
                                 }
                                 Some((old_ip, _)) if old_ip != ip => {
-                                    println!("~ {}.k8s.ppidev.net {ip}", MacAddr::from(mac));
+                                    println!("~ {} {ip}", MacAddr::from(mac));
                                     notifier.notify_waiters();
                                     notifier.notify_one();
                                 }

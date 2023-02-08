@@ -36,17 +36,12 @@ struct ServerOptions {
     #[structopt(short, long)]
     verbose: bool,
 
-    /// Domain prefix for which subdomains should be allowed
-    domain: String,
-
-    /// Location to store the zone file at
-    zone_file: PathBuf,
-
-    /// Where the authoritive nameserver for the given domain can be found
+    /// Where the authoritive nameserver for the given domains (the server hosting the generated zonefiles) can be found
     #[structopt(short, long)]
     authoritive_nameserver: String,
 
     /// Path to a file containing a whitespace separated list of IPs to where incoming request shall be mirrored
+    #[structopt(long)]
     mirror: Option<PathBuf>,
 
     /// Subnet to scan for devices
@@ -65,7 +60,20 @@ struct ServerOptions {
     /// Optionally specify the interface on which scans should be performed
     ///
     /// If not set, the interface will be inferred based on the subnet.
+    #[structopt(long)]
     arp_interface_name: Option<String>,
+
+    /// Overwrite the domain on which MAC records should be created.
+    ///
+    /// If not set, it will use the first domain.
+    #[structopt(long)]
+    arp_domain: Option<String>,
+
+    /// Directory in which to store the zone file
+    zone_dir: PathBuf,
+
+    /// Domain prefixes for which subdomains should be allowed
+    domain: Vec<String>,
 }
 
 /// Waits for changes on the given notifier and generates a new config every time it gets notified
@@ -73,43 +81,66 @@ async fn config_update_loop(
     store: Arc<Mutex<AnnouncementStore>>,
     notifier: Arc<Notify>,
     scanner: Option<Arc<SubnetScanner>>,
-    domain: String,
+    domains: Vec<String>,
     authoritive_nameserver: String,
     path: PathBuf,
+    arp_domain: Option<String>,
 ) {
-    let root_domain_len = domain.len() + 1; // +1 to include the `.` in front of the domain name
     let mut zone_serial = 0;
 
+    let arp_domain = arp_domain.unwrap_or(
+        domains
+            .first()
+            .expect("At least one domain is required")
+            .clone(),
+    );
+
+    assert!(
+        domains.contains(&arp_domain),
+        "ARP domain has to be one of the managed domains"
+    );
+
     loop {
-        let bytes = {
-            let store = store.lock().await;
-            let entries = store.entries();
+        for domain in &domains {
+            let root_domain_len = domain.len() + 1; // +1 to include the `.` in front of the domain name
 
-            // For more details on zone file formatting and what the mandatory SOA entry is all about, see:
-            // https://help.dyn.com/how-to-format-a-zone-file/
+            let bytes = {
+                let store = store.lock().await;
+                let entries = store.entries();
 
-            let mut zone_file: String = format!(
-                "@               30 SOA {authoritive_nameserver: >16}. zone-admin.{domain}. {zone_serial} 30 25 604800 30\n"
-            );
+                // For more details on zone file formatting and what the mandatory SOA entry is all about, see:
+                // https://help.dyn.com/how-to-format-a-zone-file/
 
-            for (host, ips) in entries {
-                let subdomain = &host[..host.len() - root_domain_len];
-                for ip in ips {
-                    zone_file += &format!("{subdomain: <16} 10 A {ip: >16}\n");
+                let mut zone_file: String = format!(
+                    "@               30 SOA {authoritive_nameserver: >16}. zone-admin.{domain}. {zone_serial} 30 25 604800 30\n"
+                );
+
+                for (host, ips) in entries {
+                    if !host.ends_with(domain) {
+                        continue;
+                    }
+
+                    let subdomain = &host[..host.len() - root_domain_len];
+                    for ip in ips {
+                        zone_file += &format!("{subdomain: <16} 10 A {ip: >16}\n");
+                    }
                 }
-            }
 
-            if let Some(scanner) = scanner.as_ref() {
-                for (mac, ip) in scanner.hosts() {
-                    zone_file += &format!("{mac: <16} 10 A {ip: >16}\n")
+                if domain == &arp_domain {
+                    if let Some(scanner) = scanner.as_ref() {
+                        for (mac, ip) in scanner.hosts() {
+                            zone_file += &format!("{mac: <16} 10 A {ip: >16}\n")
+                        }
+                    }
                 }
+
+                zone_file.into_bytes()
+            };
+
+            let file_path = path.join(format!("db.{}", domain));
+            if let Err(err) = fs::write(&file_path, bytes).await {
+                eprintln!("Failed to write zone file: {err}");
             }
-
-            zone_file.into_bytes()
-        };
-
-        if let Err(err) = fs::write(&path, bytes).await {
-            eprintln!("Failed to write zone file: {err}");
         }
 
         zone_serial += 1;
@@ -186,7 +217,7 @@ async fn http_server(
     store: Arc<Mutex<AnnouncementStore>>,
     notifier: Arc<Notify>,
     port: u16,
-    domain: String,
+    domains: Vec<String>,
     mirror_tx: Option<UnboundedSender<Announcement>>,
     scanner: Option<Arc<SubnetScanner>>,
 ) {
@@ -200,11 +231,13 @@ async fn http_server(
         .then(move |announcement: Announcement, mirrored: Option<bool>| {
             let store = store_ref.clone();
             let notifier = notifier.clone();
-            let domain = domain.clone();
+            let domains = domains.clone();
             let mirror_tx = mirror_tx.clone();
 
             async move {
-                if !announcement.fqdn.ends_with(&domain) {
+                let domain = domains.iter().find(|d| announcement.fqdn.ends_with(*d));
+
+                if !domain.is_some() {
                     warp::reply::with_status(
                         "Domain name suffix not allowed",
                         StatusCode::UNAUTHORIZED,
@@ -214,7 +247,6 @@ async fn http_server(
 
                     if !mirrored.unwrap_or_default() {
                         if let Some(tx) = mirror_tx {
-                            println!("mirroring request");
                             if tx.send(announcement.clone()).is_err() {
                                 eprintln!("Mirroring TX has been closed!");
                             }
@@ -274,6 +306,8 @@ async fn http_server(
 async fn main() {
     let options = ServerOptions::from_args();
 
+    std::fs::create_dir_all(&options.zone_dir).expect("failed to create zonefile directory");
+
     let notifier = Arc::new(Notify::new());
     let store = Arc::new(Mutex::new(AnnouncementStore::new(
         options.max_age,
@@ -312,7 +346,8 @@ async fn main() {
         scanner.clone(),
         options.domain.clone(),
         options.authoritive_nameserver,
-        options.zone_file,
+        options.zone_dir,
+        options.arp_domain,
     ));
 
     task::spawn(cleanup_loop(
@@ -322,7 +357,7 @@ async fn main() {
     ));
 
     println!(
-        "listening on 0.0.0.0:{} (domain=*.{})",
+        "listening on 0.0.0.0:{} (domains={:?})",
         options.port, options.domain
     );
 
