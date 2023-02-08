@@ -68,12 +68,12 @@ impl SubnetScanner {
 
         println!("Using '{iface_name}' for ARP scanning");
 
-        let interface = Interface::new_by_name(&iface_name).unwrap();
-        let ip = interface.get_ip().unwrap();
+        let interface = Interface::new_by_name(&iface_name).expect("failed to open interface");
+        let ip = interface.get_ip().expect("interface has no IP");
         let mac = interface.get_mac();
 
         let entries = Arc::new(Mutex::new(HashMap::new()));
-        let task = Self::spawn_rx_task(entries.clone(), &interface, notifier.clone(), mirror_tx);
+        let task = Self::spawn_rx_task(entries.clone(), iface_name, notifier.clone(), mirror_tx);
 
         Ok(Self {
             interface,
@@ -149,7 +149,7 @@ impl SubnetScanner {
             let fresh = i.elapsed() < max_age;
 
             if self.verbose && !fresh {
-                println!("- {}.k8s.ppidev.net {ip}", MacAddr::from(*mac));
+                println!("- {} {ip}", MacAddr::from(*mac));
             }
 
             fresh
@@ -163,13 +163,13 @@ impl SubnetScanner {
 
     fn spawn_rx_task(
         entries: Entries,
-        interface: &Interface,
+        interface_name: String,
         notifier: Arc<Notify>,
         mirror_tx: Option<UnboundedSender<IncomingAnnouncement>>,
     ) -> JoinHandle<()> {
-        let own_mac = interface.get_mac();
         let entries = entries.clone();
-        let mut client = ArpClient::new_with_iface(interface).unwrap();
+        let mut client = ArpClient::new_with_iface_name(&interface_name)
+            .expect("failed to create ethernet monitor");
 
         tokio::spawn(async move {
             loop {
@@ -178,10 +178,6 @@ impl SubnetScanner {
                         Operation::ArpResponse | Operation::RarpResponse => {
                             let mac = message.source_hardware_address;
                             let ip = message.source_protocol_address;
-
-                            if mac == own_mac {
-                                continue;
-                            }
 
                             if let Some(tx) = mirror_tx.as_ref() {
                                 if tx

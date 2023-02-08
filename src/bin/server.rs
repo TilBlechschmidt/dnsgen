@@ -61,7 +61,7 @@ struct ServerOptions {
     ///
     /// If not set, the interface will be inferred based on the subnet.
     #[structopt(long)]
-    arp_interface_name: Option<String>,
+    arp_interface: Option<String>,
 
     /// Overwrite the domain on which MAC records should be created.
     ///
@@ -345,7 +345,7 @@ async fn main() {
         let scanner = Arc::new(
             SubnetScanner::new(
                 subnet,
-                options.arp_interface_name,
+                options.arp_interface,
                 notifier.clone(),
                 options.verbose,
                 mirror_tx.clone(),
