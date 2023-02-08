@@ -1,4 +1,4 @@
-use dnsgen::{parse_seconds, Announcement, AnnouncementStore, MacAddr, SubnetScanner};
+use dnsgen::{parse_seconds, AnnouncementStore, IncomingAnnouncement, SubnetScanner};
 use ipnet::Ipv4Net;
 use reqwest::{Client, StatusCode, Url};
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
@@ -180,7 +180,7 @@ async fn fetch_mirroring_endpoints(path: &PathBuf) -> Result<Vec<Url>, io::Error
 }
 
 /// Mirrors requests to other instances of dnsgen
-async fn mirroring_loop(mut rx: UnboundedReceiver<Announcement>, path: PathBuf) {
+async fn mirroring_loop(mut rx: UnboundedReceiver<IncomingAnnouncement>, path: PathBuf) {
     let client = Client::new();
 
     while let Some(announcement) = rx.recv().await {
@@ -218,50 +218,69 @@ async fn http_server(
     notifier: Arc<Notify>,
     port: u16,
     domains: Vec<String>,
-    mirror_tx: Option<UnboundedSender<Announcement>>,
+    mirror_tx: Option<UnboundedSender<IncomingAnnouncement>>,
     scanner: Option<Arc<SubnetScanner>>,
 ) {
     let store_ref = store.clone();
+    let scanner_ref = scanner.clone();
 
     let receiver = warp::post()
         .and(warp::path::end())
         .and(warp::body::content_length_limit(1024))
         .and(warp::body::json())
         .and(warp::header::optional(HEADER_DNSGEN_MIRROR))
-        .then(move |announcement: Announcement, mirrored: Option<bool>| {
-            let store = store_ref.clone();
-            let notifier = notifier.clone();
-            let domains = domains.clone();
-            let mirror_tx = mirror_tx.clone();
+        .then(
+            move |incoming: IncomingAnnouncement, mirrored: Option<bool>| {
+                let store = store_ref.clone();
+                let notifier = notifier.clone();
+                let domains = domains.clone();
+                let mirror_tx = mirror_tx.clone();
+                let scanner = scanner_ref.clone();
 
-            async move {
-                let domain = domains.iter().find(|d| announcement.fqdn.ends_with(*d));
+                if !mirrored.unwrap_or_default() {
+                    if let Some(tx) = mirror_tx {
+                        if tx.send(incoming.clone()).is_err() {
+                            eprintln!("Mirroring TX has been closed!");
+                        }
+                    }
+                }
 
-                if !domain.is_some() {
-                    warp::reply::with_status(
-                        "Domain name suffix not allowed",
-                        StatusCode::UNAUTHORIZED,
-                    )
-                } else {
-                    let mut store = store.lock().await;
+                async move {
+                    match incoming {
+                        IncomingAnnouncement::Domain(announcement) => {
+                            let domain = domains.iter().find(|d| announcement.fqdn.ends_with(*d));
 
-                    if !mirrored.unwrap_or_default() {
-                        if let Some(tx) = mirror_tx {
-                            if tx.send(announcement.clone()).is_err() {
-                                eprintln!("Mirroring TX has been closed!");
+                            if !domain.is_some() {
+                                warp::reply::with_status(
+                                    "Domain name suffix not allowed",
+                                    StatusCode::UNAUTHORIZED,
+                                )
+                            } else {
+                                let mut store = store.lock().await;
+
+                                if store.add(announcement) {
+                                    notifier.notify_waiters();
+                                    notifier.notify_one();
+                                }
+
+                                warp::reply::with_status("OK", StatusCode::OK)
+                            }
+                        }
+                        IncomingAnnouncement::Arp(discovery) => {
+                            if let Some(scanner) = scanner {
+                                scanner.add(discovery.mac, discovery.ip);
+                                warp::reply::with_status("OK", StatusCode::OK)
+                            } else {
+                                warp::reply::with_status(
+                                    "ARP support not enabled on this instance",
+                                    StatusCode::FORBIDDEN,
+                                )
                             }
                         }
                     }
-
-                    if store.add(announcement) {
-                        notifier.notify_waiters();
-                        notifier.notify_one();
-                    }
-
-                    warp::reply::with_status("OK", StatusCode::OK)
                 }
-            }
-        });
+            },
+        );
 
     let resolve = warp::post()
         .and(warp::path("resolve"))
@@ -329,6 +348,7 @@ async fn main() {
                 options.arp_interface_name,
                 notifier.clone(),
                 options.verbose,
+                mirror_tx.clone(),
             )
             .expect("failed to initialize ARP scanner"),
         );

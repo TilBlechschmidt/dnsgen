@@ -13,17 +13,19 @@ use libarp::{
     interfaces::{Interface, MacAddr as ArpMacAddr},
 };
 use pnet_datalink::interfaces;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::Notify,
+    sync::{mpsc::UnboundedSender, Notify},
     task::JoinHandle,
     time::{sleep, timeout},
 };
 
+use crate::IncomingAnnouncement;
+
 const STAGGER: Duration = Duration::from_millis(1);
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct MacAddr(pub [u8; 6]);
 
 type Entries = Arc<Mutex<HashMap<MacAddr, (Ipv4Addr, Instant)>>>;
@@ -48,6 +50,7 @@ impl SubnetScanner {
         iface_name: Option<String>,
         notifier: Arc<Notify>,
         verbose: bool,
+        mirror_tx: Option<UnboundedSender<IncomingAnnouncement>>,
     ) -> io::Result<Self> {
         let iface_name = iface_name.unwrap_or(interfaces()
             .into_iter()
@@ -70,7 +73,7 @@ impl SubnetScanner {
         let mac = interface.get_mac();
 
         let entries = Arc::new(Mutex::new(HashMap::new()));
-        let task = Self::spawn_rx_task(entries.clone(), &interface, notifier.clone());
+        let task = Self::spawn_rx_task(entries.clone(), &interface, notifier.clone(), mirror_tx);
 
         Ok(Self {
             interface,
@@ -104,6 +107,13 @@ impl SubnetScanner {
         message.send(&self.interface)?;
 
         Ok(self::timeout(timeout, self.wait_for_host(mac)).await?)
+    }
+
+    pub fn add(&self, mac: MacAddr, ip: Ipv4Addr) {
+        self.entries
+            .lock()
+            .expect("failed to lock ARP mutex")
+            .insert(mac, (ip, Instant::now()));
     }
 
     async fn wait_for_host(&self, mac: MacAddr) -> Ipv4Addr {
@@ -155,7 +165,9 @@ impl SubnetScanner {
         entries: Entries,
         interface: &Interface,
         notifier: Arc<Notify>,
+        mirror_tx: Option<UnboundedSender<IncomingAnnouncement>>,
     ) -> JoinHandle<()> {
+        let own_mac = interface.get_mac();
         let entries = entries.clone();
         let mut client = ArpClient::new_with_iface(interface).unwrap();
 
@@ -167,8 +179,21 @@ impl SubnetScanner {
                             let mac = message.source_hardware_address;
                             let ip = message.source_protocol_address;
 
-                            // TODO Ignore or automatically add own MAC/IP
-                            // TODO Mirror requests to somewhere
+                            if mac == own_mac {
+                                continue;
+                            }
+
+                            if let Some(tx) = mirror_tx.as_ref() {
+                                if tx
+                                    .send(IncomingAnnouncement::Arp(crate::ArpDiscovery {
+                                        mac: mac.into(),
+                                        ip,
+                                    }))
+                                    .is_err()
+                                {
+                                    eprintln!("Mirroring TX has been closed!");
+                                }
+                            }
 
                             let old_entry = entries
                                 .lock()
@@ -237,6 +262,12 @@ impl TryFrom<String> for MacAddr {
             6 => Ok(Self(bytes)),
             _ => Err("invalid number of hex digits".into()),
         }
+    }
+}
+
+impl From<MacAddr> for String {
+    fn from(value: MacAddr) -> Self {
+        value.to_string()
     }
 }
 

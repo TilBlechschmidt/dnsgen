@@ -4,7 +4,7 @@ use std::{net::Ipv4Addr, num::ParseIntError, time::Duration};
 mod arp;
 mod store;
 
-pub use arp::{SubnetScanner, MacAddr};
+pub use arp::{MacAddr, SubnetScanner};
 pub use store::AnnouncementStore;
 
 pub type FQDN = String;
@@ -13,6 +13,19 @@ pub type FQDN = String;
 pub struct Announcement {
     pub fqdn: FQDN,
     pub ip: Ipv4Addr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ArpDiscovery {
+    pub mac: MacAddr,
+    pub ip: Ipv4Addr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum IncomingAnnouncement {
+    Domain(Announcement),
+    Arp(ArpDiscovery),
 }
 
 /// Parses a Duration from a string containing seconds.
