@@ -73,7 +73,7 @@ impl SubnetScanner {
         let mac = interface.get_mac();
 
         let entries = Arc::new(Mutex::new(HashMap::new()));
-        let task = Self::spawn_rx_task(entries.clone(), iface_name, notifier.clone(), mirror_tx);
+        let task = Self::spawn_rx_task(entries.clone(), &interface, notifier.clone(), mirror_tx);
 
         Ok(Self {
             interface,
@@ -163,13 +163,13 @@ impl SubnetScanner {
 
     fn spawn_rx_task(
         entries: Entries,
-        interface_name: String,
+        interface: &Interface,
         notifier: Arc<Notify>,
         mirror_tx: Option<UnboundedSender<IncomingAnnouncement>>,
     ) -> JoinHandle<()> {
         let entries = entries.clone();
-        let mut client = ArpClient::new_with_iface_name(&interface_name)
-            .expect("failed to create ethernet monitor");
+        let mut client =
+            ArpClient::new_with_iface(&interface).expect("failed to create ethernet monitor");
 
         tokio::spawn(async move {
             loop {

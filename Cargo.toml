@@ -10,8 +10,8 @@ tokio = { version = "1", features = ["full"] }
 warp = "0.3"
 
 # Client side
-pnet_datalink = "0.31"
-ipnetwork = "0.19"
+pnet_datalink = "0.33"
+ipnetwork = "0.20"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 # Common
